@@ -1,239 +1,155 @@
 import cv2
-import numpy as np
-from ultralytics import YOLO
 import torch
-import time
+from ultralytics import YOLO
 
-# ================================
-# Configuration Variables
-# ================================
+# Feel free to change this to any integer value you like for quick testing.
+MAX_FRAMES = 200
 
-# Path to your video file
-VIDEO_PATH = 'run.MP4'  # Change this to your video file path
-
-# Maximum number of frames to process (set to None to process the entire video)
-MAX_FRAMES = 100  # Set to None for no limit
-
-# Enable verbose logging (set to True for detailed logs, False to suppress)
-VERBOSE = False  # Set to True if you want detailed logs
-
-# ================================
-# Device Configuration
-# ================================
-
-# Determine the device to use: CUDA, MPS, or CPU
-if torch.cuda.is_available():
-    DEVICE = 'cuda'
-elif torch.backends.mps.is_available():
-    DEVICE = 'mps'
-    if VERBOSE:
-        print("Using MPS (Metal Performance Shaders) backend.")
-else:
-    DEVICE = 'cpu'
-    if VERBOSE:
-        print("Using CPU.")
-
-# Initialize YOLOv8 model (YOLOv8n for nano - faster performance)
-MODEL = YOLO('yolov8n.pt').to(DEVICE)  # Use 'yolov8n.pt' for faster performance
-
-# ================================
-# Define Target Classes and Colors
-# ================================
-
-# Define target classes based on your requirements
-TARGET_CLASSES = [
-    "person", "bicycle", "motorcycle", "car", "aeroplane",
-    "bus", "boat", "stop sign", "umbrella", "sports ball",
-    "baseball bat", "bed", "tennis racket", "suitcase", "skis"
-]
-
-# Define colors for classes (optional)
-COLORS = {
-    "person": (0, 255, 0),
-    "car": (255, 0, 0),
-    "motorcycle": (0, 0, 255),
-    # Add more classes and their colors as needed
+# Define the set of COCO class IDs that approximate your desired categories
+TARGET_CLASS_IDS = {
+    0,   # person (for person/mannequin)
+    2,   # car
+    3,   # motorcycle
+    4,   # airplane
+    5,   # bus
+    8,   # boat
+    11,  # stop sign
+    25,  # umbrella
+    28,  # suitcase
+    30,  # skis
+    31,  # snowboard
+    32,  # sports ball
+    34,  # baseball bat
+    38,  # tennis racket
+    59,  # bed
 }
 
-# ================================
-# Video Capture Setup
-# ================================
+# Optionally, define a custom label dictionary if you want user-friendly names.
+# (However, for drawing on frames, you can just use YOLO's built-in label strings.)
+CUSTOM_LABELS = {
+    0:  "Person / Mannequin",
+    2:  "Car (>1:8 Scale Model)",
+    3:  "Motorcycle (>1:8 Scale Model)",
+    4:  "Airplane (>3m Wing Span Scale Model)",
+    5:  "Bus (>1:8 Scale Model)",
+    8:  "Boat (>1:8 Scale Model)",
+    11: "Stop Sign (Flat, Upwards Facing)",
+    25: "Umbrella",
+    28: "Suitcase",
+    30: "Skis",
+    31: "Snowboard",
+    32: "Sports Ball (Regulation Size)",
+    34: "Baseball Bat",
+    38: "Tennis Racket",
+    59: "Bed / Mattress (> Twin Size)",
+}
 
-# Open the video file
-cap = cv2.VideoCapture(VIDEO_PATH)
-if not cap.isOpened():
-    print(f"Error: Cannot open video file {VIDEO_PATH}")
-    exit()
+def draw_detections(frame, detections):
+    """
+    Draw bounding boxes and labels on a copy of the frame based on filtered detections.
+    detections: list of tuples (x1, y1, x2, y2, class_name, conf)
+    """
+    annotated_frame = frame.copy()
+    for x1, y1, x2, y2, class_name, conf in detections:
+        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        label = f"{class_name} {conf:.2f}"
+        cv2.putText(
+            annotated_frame,
+            label,
+            (x1, max(0, y1 - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 255, 0),
+            2
+        )
+    return annotated_frame
 
-# Get total number of frames in the video
-original_total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+def main():
+    # Select 'mps' device if available, otherwise fall back to CPU.
+    # (This uses Apple's Metal Performance Shaders on macOS with Apple Silicon.)
+    device = torch.device("mps") if torch.backends.mps.is_available() else torch.device("cpu")
+    print(f"Using device: {device}")
 
-# Determine the number of frames to process
-if MAX_FRAMES is not None:
-    total_frames = min(original_total_frames, MAX_FRAMES)
-else:
-    total_frames = original_total_frames
+    # Load YOLOv8 model (pretrained on COCO)
+    model = YOLO("yolov8n.pt").to(device)
 
-if VERBOSE:
-    print(f"Total frames in video: {original_total_frames}")
-    if MAX_FRAMES is not None:
-        print(f"Processing up to {total_frames} frames for testing.")
+    # Open the video file
+    cap = cv2.VideoCapture("run.MP4")
+    if not cap.isOpened():
+        print("Error: Could not open video.")
+        return
 
-# ================================
-# Create Display Window and Trackbar
-# ================================
+    all_frames = []
+    all_detections = []
 
-# Create a window
-cv2.namedWindow('Object Recognition', cv2.WINDOW_NORMAL)
-
-# Initialize variables
-paused = False
-current_frame = 0
-processed_frames = 0  # Counter for processed frames
-
-def on_trackbar(val):
-    global current_frame, paused
-    current_frame = val
-    cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
-    paused = True  # Pause the video when trackbar is used
-    if VERBOSE:
-        print(f"Trackbar moved to frame {current_frame}.")
-
-# Create a trackbar with the updated total_frames
-if total_frames > 0:
-    cv2.createTrackbar('Position', 'Object Recognition', 0, total_frames - 1, on_trackbar)
-else:
-    print("Warning: Total frames to process is 0.")
-
-# ================================
-# Frame Processing Loop
-# ================================
-
-while True:
-    # Check if the current frame exceeds MAX_FRAMES
-    if MAX_FRAMES is not None and processed_frames >= MAX_FRAMES:
-        if VERBOSE:
-            print(f"Reached the maximum of {MAX_FRAMES} frames. Exiting.")
-        break
-
-    if not paused:
+    frame_count = 0
+    while True:
         ret, frame = cap.read()
         if not ret:
-            if VERBOSE:
-                print("End of video reached or cannot fetch the frame.")
-            break
-        current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-        cv2.setTrackbarPos('Position', 'Object Recognition', current_frame)
-        processed_frames += 1
-        if VERBOSE:
-            print(f"Processing frame {processed_frames}/{total_frames}")
-    else:
-        # When paused, seek to the current frame
-        cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
-        ret, frame = cap.read()
-        if not ret:
-            if VERBOSE:
-                print("Cannot fetch the frame while paused.")
+            break  # End of video or can't read further
+
+        frame_count += 1
+        if frame_count > MAX_FRAMES:
             break
 
-    # Start time for FPS calculation
-    start_time = time.time()
+        # Convert BGR -> RGB if needed. YOLOv8 can handle BGR directly,
+        # but converting is often the canonical approach.
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    # Perform inference with verbose=False to suppress model printouts
-    results = MODEL(frame, verbose=False)
+        # Run detection on the current frame
+        results = model.predict(rgb_frame, device=device, verbose=False)
+        boxes = results[0].boxes
 
-    # Extract detections
-    detections = results[0].boxes  # Assuming batch size of 1
+        # Filter boxes to keep only TARGET_CLASS_IDS
+        frame_detections = []
+        for box in boxes:
+            class_id = int(box.cls[0])
+            if class_id in TARGET_CLASS_IDS:
+                conf = float(box.conf[0])
+                # Convert xyxy floats to integers for drawing
+                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
 
-    # Loop through detections
-    for box in detections:
-        cls_id = int(box.cls)
-        cls_name = MODEL.names[cls_id]
-        confidence = box.conf.item()  # Correctly convert tensor to scalar
+                # Use YOLO's default label or a custom label
+                default_label = model.names[class_id]
+                display_label = CUSTOM_LABELS.get(class_id, default_label)
 
-        if cls_name in TARGET_CLASSES and confidence > 0.2:
-            # Properly convert tensor to list before mapping to int
-            try:
-                # Access the first (and only) list inside the outer list
-                coords = box.xyxy.tolist()
-                if isinstance(coords, list) and len(coords) > 0 and isinstance(coords[0], list):
-                    x1, y1, x2, y2 = [int(coord) for coord in coords[0]]
-                else:
-                    raise ValueError("Invalid coordinates format.")
-            except Exception as e:
-                if VERBOSE:
-                    print(f"Error converting box coordinates: {e}")
-                continue  # Skip this box if there's an error
+                frame_detections.append((x1, y1, x2, y2, display_label, conf))
 
-            # Optionally filter based on box size for scale
-            frame_height, frame_width = frame.shape[:2]
-            box_width = x2 - x1
-            box_height = y2 - y1
+        # Store original frame (for later display) and the detections
+        all_frames.append(frame.copy())
+        all_detections.append(frame_detections)
 
-            # Example condition for "Car (>1:8 Scale Model)"
-            if cls_name == "car" and box_width < (frame_width / 8):
-                continue  # Skip if car is smaller than 1:8 scale
+    cap.release()
 
-            # Get color for the class
-            color = COLORS.get(cls_name, (0, 255, 0))  # Default to green
+    # Now that we've processed the video (up to MAX_FRAMES), build a player interface
+    # with a trackbar to scrub frames/detections.
+    cv2.namedWindow("Detections", cv2.WINDOW_NORMAL)
 
-            # Draw bounding box
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    def on_trackbar(pos):
+        # Get the corresponding frame and its detections
+        frame_idx = pos
+        if 0 <= frame_idx < len(all_frames):
+            frame = all_frames[frame_idx]
+            detections = all_detections[frame_idx]
+            annotated = draw_detections(frame, detections)
+            cv2.imshow("Detections", annotated)
 
-            # Put label
-            label = f"{cls_name}: {confidence*100:.2f}%"
-            y = y1 - 10 if y1 - 10 > 10 else y1 + 10
-            cv2.putText(frame, label, (x1, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+    total_frames = len(all_frames)
+    if total_frames == 0:
+        print("No frames processed. Exiting.")
+        cv2.destroyAllWindows()
+        return
 
-    # Calculate FPS
-    end_time = time.time()
-    fps = 1 / (end_time - start_time)
+    # Create trackbar
+    cv2.createTrackbar("Frame", "Detections", 0, total_frames - 1, on_trackbar)
+    on_trackbar(0)
 
-    # Put FPS on frame
-    cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    # Keep the window open until 'Esc' key is pressed
+    while True:
+        if cv2.waitKey(1) & 0xFF == 27:
+            break
 
-    # Display the output frame
-    cv2.imshow('Object Recognition', frame)
+    cv2.destroyAllWindows()
 
-    key = cv2.waitKey(1) & 0xFF  # Reduced wait time for smoother FPS
-
-    if key == ord('q'):
-        if VERBOSE:
-            print("Quit key pressed. Exiting.")
-        break
-    elif key == ord('p'):
-        # Pause or play
-        paused = not paused
-        if VERBOSE:
-            state = "paused" if paused else "playing"
-            print(f"Video {state}.")
-    elif key == ord('n'):
-        # Next frame
-        paused = True
-        current_frame += 1
-        if current_frame >= total_frames:
-            current_frame = total_frames - 1
-        cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
-        if VERBOSE:
-            print(f"Moved to frame {current_frame}.")
-    elif key == ord('b'):
-        # Previous frame
-        paused = True
-        current_frame -= 1
-        if current_frame < 0:
-            current_frame = 0
-        cap.set(cv2.CAP_PROP_POS_FRAMES, current_frame)
-        if VERBOSE:
-            print(f"Moved back to frame {current_frame}.")
-
-# ================================
-# Cleanup
-# ================================
-
-# Release the video capture and close windows
-cap.release()
-cv2.destroyAllWindows()
-if VERBOSE:
-    print("Released video capture and destroyed all windows.")
+if __name__ == "__main__":
+    main()
