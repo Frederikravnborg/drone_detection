@@ -124,7 +124,12 @@ def main():
     # Now that we've processed the video (up to MAX_FRAMES), build a player interface
     # with a trackbar to scrub frames/detections.
     cv2.namedWindow("Detections", cv2.WINDOW_NORMAL)
-
+    
+    # Add state variables for playback control
+    playing = False
+    last_frame_time = 0
+    fps = 30  # Default playback speed
+    
     def on_trackbar(pos):
         # Get the corresponding frame and its detections
         frame_idx = pos
@@ -132,6 +137,19 @@ def main():
             frame = all_frames[frame_idx]
             detections = all_detections[frame_idx]
             annotated = draw_detections(frame, detections)
+            
+            # Add play/pause indicator
+            status = "Playing" if playing else "Paused"
+            cv2.putText(
+                annotated,
+                status,
+                (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 255, 0),
+                2
+            )
+            
             cv2.imshow("Detections", annotated)
 
     total_frames = len(all_frames)
@@ -142,12 +160,42 @@ def main():
 
     # Create trackbar
     cv2.createTrackbar("Frame", "Detections", 0, total_frames - 1, on_trackbar)
+    
+    def get_current_frame():
+        return cv2.getTrackbarPos("Frame", "Detections")
+    
+    def set_frame(frame_idx):
+        frame_idx = max(0, min(frame_idx, total_frames - 1))
+        cv2.setTrackbarPos("Frame", "Detections", frame_idx)
+
+    # Initial display
     on_trackbar(0)
 
-    # Keep the window open until 'Esc' key is pressed
     while True:
-        if cv2.waitKey(1) & 0xFF == 27:
+        current_time = cv2.getTickCount() / cv2.getTickFrequency()
+        
+        # Handle automatic playback
+        if playing and (current_time - last_frame_time) > 1.0/fps:
+            next_frame = get_current_frame() + 1
+            if next_frame >= total_frames:
+                playing = False  # Stop at end of video
+            else:
+                set_frame(next_frame)
+                last_frame_time = current_time
+
+        key = cv2.waitKey(1) & 0xFF
+        
+        if key == 27 or key == ord('q'):  # Esc key or 'q'
             break
+        elif key == ord(' '):  # Space bar - toggle play/pause
+            playing = not playing
+            last_frame_time = current_time
+        elif key == 83 or key == ord('d'):  # Right arrow or 'd'
+            playing = False
+            set_frame(get_current_frame() + 1)
+        elif key == 81 or key == ord('a'):  # Left arrow or 'a'
+            playing = False
+            set_frame(get_current_frame() - 1)
 
     cv2.destroyAllWindows()
 
