@@ -4,6 +4,9 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import cv2
 
+# Toggle between using live camera feed and MP4 file.
+USE_MP4_FILE = True  # Set to True to use run.mp4, False for live camera
+
 class CameraNode(Node):
     def __init__(self):
         super().__init__('camera_node')
@@ -11,16 +14,21 @@ class CameraNode(Node):
         # Create a publisher that publishes sensor_msgs/Image on the /camera/image topic.
         self.publisher_ = self.create_publisher(Image, '/camera/image', 10)
 
-        # Create a timer to periodically read frames from the camera.
-        # Here we set 0.1 seconds => 10 Hz frame rate. Adjust as needed.
-        timer_period = 0.1  
+        # Create a timer to periodically read frames from the camera/video.
+        timer_period = 0.1  # seconds (10 Hz frame rate)
         self.timer = self.create_timer(timer_period, self.timer_callback)
 
-        # Initialize the camera (assuming device index 0).
-        self.cap = cv2.VideoCapture(0)  
-        if not self.cap.isOpened():
-            self.get_logger().error("Could not open camera.")
-            # Optionally raise an exception or handle error
+        # Depending on the toggle, open the appropriate video source.
+        if USE_MP4_FILE:
+            self.cap = cv2.VideoCapture("run.mp4")
+            if not self.cap.isOpened():
+                self.get_logger().error("Could not open video file run.mp4.")
+            else:
+                self.get_logger().info("Opened run.mp4 for video streaming.")
+        else:
+            self.cap = cv2.VideoCapture(0)
+            if not self.cap.isOpened():
+                self.get_logger().error("Could not open camera.")
 
         # Initialize CvBridge
         self.bridge = CvBridge()
@@ -28,12 +36,19 @@ class CameraNode(Node):
 
     def timer_callback(self):
         ret, frame = self.cap.read()
+
+        # If using MP4 and we reach end-of-file, loop back.
+        if USE_MP4_FILE and not ret:
+            self.get_logger().warning("Reached end of video. Looping back to start.")
+            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ret, frame = self.cap.read()
+
+        # If reading frame failed (for camera or unexpected mp4 issue), log and skip publishing.
         if not ret:
-            self.get_logger().warning("Failed to read frame from camera.")
+            self.get_logger().warning("Failed to read frame from camera/video source.")
             return
 
         # Convert OpenCV image (BGR) to ROS Image message
-        # encoding can be 'bgr8' (typical for OpenCV’s default BGR) or 'rgb8'
         ros_image = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
 
         # Attach the current ROS2 time to the header
@@ -43,8 +58,9 @@ class CameraNode(Node):
         self.publisher_.publish(ros_image)
 
     def destroy_node(self):
-        # Close camera when node is destroyed
-        self.cap.release()
+        # Release the video/camera resource before shutting down
+        if self.cap.isOpened():
+            self.cap.release()
         super().destroy_node()
 
 def main(args=None):
