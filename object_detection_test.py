@@ -2,13 +2,13 @@ import cv2
 import torch
 from ultralytics import YOLO
 
-# video_path = "/Users/fredmac/Documents/DTU-FredMac/Drone/videos/basketball.mp4"
-# video_path = "/Users/fredmac/Documents/DTU-FredMac/Drone/videos/football.mp4"
-video_path = "/Users/fredmac/Documents/DTU-FredMac/Drone/videos/traffic.mp4"
+# video_path = "videos/basketball.mp4"
+video_path = "videos/football.mp4"
+# video_path = "videos/traffic.mp4"
 
 # HYPERPARAMETERS
 model_name = "yolov8l.pt"
-conf_threshold = 0.01       # Lower confidence threshold to increase recall
+conf_threshold = 0.1       # Lower confidence threshold to increase recall
 iou_threshold = 0.50        # Slightly higher IoU threshold to help with tighter boxes
 MAX_FRAMES = 200
 MAX_MISSES = 5              # How many frames to persist an object if it temporarily disappears
