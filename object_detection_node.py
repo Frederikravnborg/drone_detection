@@ -30,7 +30,6 @@ TARGET_CLASS_IDS = {
     59,  # bed (for mattress)
 }
 
-# Optionally, define a custom label dictionary if you want user-friendly names.
 CUSTOM_LABELS = {
     0:  "Person / Mannequin",
     2:  "Car (>1:8 Scale Model)",
@@ -49,31 +48,25 @@ CUSTOM_LABELS = {
     59: "Bed / Mattress (> Twin Size)",
 }
 
+# Tracking hyperparameters
+MAX_MISSES = 5
+ALPHA = 0.7
+
 class ObjectDetectionNode(Node):
     def __init__(self):
         super().__init__('object_detection_node')
 
-        # ---------------------------
         # ROS Sub/Pub Setup
-        # ---------------------------
-        # Subscribe to the /camera/image topic
         self.subscription = self.create_subscription(
             Image,
             '/camera/image',
             self.listener_callback,
             10
         )
-
-        # Publisher for the detection results (JSON-encoded string on /vision/object_spotted)
         self.publisher_ = self.create_publisher(String, '/vision/object_spotted', 10)
-
-        # Initialize CvBridge for image conversion
         self.bridge = CvBridge()
 
-        # ---------------------------
-        # YOLO & Torch Setup
-        # ---------------------------
-        # Pick device: 'mps' if available (Apple Silicon), else GPU, else CPU.
+        # Device Selection
         if torch.backends.mps.is_available():
             self.device = torch.device("mps")
             self.get_logger().info("Using Apple MPS device.")
@@ -84,95 +77,104 @@ class ObjectDetectionNode(Node):
             self.device = torch.device("cpu")
             self.get_logger().info("Using CPU device.")
 
-        # Load YOLOv8 model (pretrained on COCO) to the chosen device
+        # Load YOLOv8 model
+        # Use a larger model as in Script 2, if desired; here we continue using "yolov8n.pt" for consistency
         self.model = YOLO("yolov8n.pt").to(self.device)
+
+        # Initialize track history
+        self.track_history = {}
 
         self.get_logger().info("Object Detection Node started. Subscribed to /camera/image.")
 
     def listener_callback(self, ros_image):
-        """Callback that runs each time we receive an Image on /camera/image."""
-        # Convert ROS Image to OpenCV format (BGR)
         try:
             frame = self.bridge.imgmsg_to_cv2(ros_image, desired_encoding='bgr8')
         except Exception as e:
             self.get_logger().error(f"Failed to convert ROS Image to OpenCV image: {e}")
             return
 
-        # Retrieve the timestamp (from the image header).
-        # Convert ROS2 time to float in seconds or to an int in milliseconds.
         stamp = ros_image.header.stamp.sec + ros_image.header.stamp.nanosec * 1e-9
-        timestamp_ms = int(stamp * 1000)  # example in milliseconds
+        timestamp_ms = int(stamp * 1000)
 
-        # --------------------------------------------------------
-        # Perform object detection using your YOLO approach
-        # --------------------------------------------------------
-        # Convert BGR -> RGB if desired (YOLOv8 can handle BGR, but here's the canonical approach):
+        # Convert BGR -> RGB
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Run detection
-        results = self.model.predict(rgb_frame, device=self.device, verbose=False)
-        boxes = results[0].boxes
+        # Use the tracking API on the single frame
+        # Note: We wrap the frame in a list to treat it as a source sequence of one frame.
+        tracking_results = self.model.track(
+            source=[rgb_frame],
+            device=self.device,
+            conf=0.01,     # Lower confidence threshold as in Script 2
+            iou=0.50,      # Slightly higher IoU threshold
+            tracker="config/bytetrack.yaml",
+            stream=True,
+            show=False
+        )
 
-        # Filter boxes to keep only TARGET_CLASS_IDS
-        detections = []
-        for box in boxes:
-            class_id = int(box.cls[0])
-            if class_id in TARGET_CLASS_IDS:
-                conf = float(box.conf[0])
-                # Convert xyxy floats to integers for bounding boxes
-                x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+        # Process tracking results for the current frame
+        current_detections = []
+        for result in tracking_results:
+            # Check if detections exist for this frame
+            if result.boxes is not None and len(result.boxes) > 0:
+                for box in result.boxes:
+                    class_id = int(box.cls[0])
+                    if class_id not in TARGET_CLASS_IDS:
+                        continue
 
-                # Calculate center coordinates, width, and height
-                cx = (x1 + x2) // 2
-                cy = (y1 + y2) // 2
-                width = x2 - x1
-                height = y2 - y1
+                    conf = float(box.conf[0])
+                    x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
+                    # Retrieve track_id from the tracker; if not available, use -1 as a placeholder
+                    track_id = int(box.id[0]) if box.id is not None else -1
 
-                # Use YOLO's default label or a custom label
-                default_label = self.model.names[class_id]
-                display_label = CUSTOM_LABELS.get(class_id, default_label)
+                    default_label = self.model.names.get(class_id, f"class_{class_id}")
+                    display_label = CUSTOM_LABELS.get(class_id, default_label)
 
-                # This detection includes bounding box corners, label, confidence, etc.
-                detection_info = {
-                    "class_id": class_id,
-                    "label": display_label,
-                    "confidence": conf,
-                    "bbox": [x1, y1, x2, y2],
-                    "center": [cx, cy],
-                    "width": width,
-                    "height": height
-                }
-                detections.append(detection_info)
+                    # Apply smoothing if this track has history
+                    if track_id in self.track_history:
+                        old_x1, old_y1, old_x2, old_y2 = self.track_history[track_id]["bbox"]
+                        x1 = int(ALPHA * x1 + (1 - ALPHA) * old_x1)
+                        y1 = int(ALPHA * y1 + (1 - ALPHA) * old_y1)
+                        x2 = int(ALPHA * x2 + (1 - ALPHA) * old_x2)
+                        y2 = int(ALPHA * y2 + (1 - ALPHA) * old_y2)
 
-        # --------------------------------------------------------
-        # Publish detection results
-        # --------------------------------------------------------
-        # Prepare the data to publish with [cx, cy, width, height]
+                    # Update track history
+                    self.track_history[track_id] = {
+                        "bbox": (x1, y1, x2, y2),
+                        "conf": conf,
+                        "label": display_label,
+                        "miss_count": 0
+                    }
+                    current_detections.append(track_id)
+
+        # Increase miss_count for tracks not detected in this frame
+        for t_id in list(self.track_history.keys()):
+            if t_id not in current_detections:
+                self.track_history[t_id]["miss_count"] += 1
+                if self.track_history[t_id]["miss_count"] > MAX_MISSES:
+                    del self.track_history[t_id]
+
+        # Prepare detections for publishing
         results_to_publish = []
-        for detection in detections:
-            x1, y1, x2, y2 = detection["bbox"]
-            # Calculate center, width, and height
+        for track_id, info in self.track_history.items():
+            x1, y1, x2, y2 = info["bbox"]
             cx = (x1 + x2) // 2
             cy = (y1 + y2) // 2
             width = x2 - x1
             height = y2 - y1
 
-            # Construct a detection dictionary consistent with your specs
             detection_dict = {
-                "object_id": detection["class_id"],            # or some unique ID if needed
+                "object_id": info.get("label"),  # Using label instead of class_id for more informative output
                 "position": [cx, cy, width, height],
-                "label": detection["label"],
-                "confidence": detection["confidence"],
+                "confidence": info["conf"],
                 "timestamp": timestamp_ms,
+                "track_id": track_id
             }
             results_to_publish.append(detection_dict)
 
-        # Publish the entire list of detections as a JSON string
         msg = String()
         msg.data = json.dumps({"detections": results_to_publish})
         self.publisher_.publish(msg)
 
-        # Optional debug log
         self.get_logger().info(f"Published {len(results_to_publish)} detections at t={timestamp_ms} ms.")
 
 def main(args=None):

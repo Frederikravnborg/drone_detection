@@ -7,31 +7,14 @@ from ultralytics import YOLO
 video_path = "/Users/fredmac/Documents/DTU-FredMac/Drone/videos/traffic.mp4"
 
 # HYPERPARAMETERS
-model_name = "yolov8l.pt"
+model_name = "yolov8x.pt"
 conf_threshold = 0.01       # Lower confidence threshold to increase recall
 iou_threshold = 0.50        # Slightly higher IoU threshold to help with tighter boxes
 MAX_FRAMES = 200
 MAX_MISSES = 5              # How many frames to persist an object if it temporarily disappears
 ALPHA = 0.7                 # Bounding box smoothing factor (0=no smoothing, 1=full smoothing)
 
-# Define the set of COCO class IDs that approximate your desired categories
-TARGET_CLASS_IDS = {
-    0,   # person
-    2,   # car
-    3,   # motorcycle
-    4,   # airplane
-    5,   # bus
-    8,   # boat
-    11,  # stop sign
-    25,  # umbrella
-    28,  # suitcase
-    30,  # skis
-    31,  # snowboard
-    32,  # sports ball
-    34,  # baseball bat
-    38,  # tennis racket
-    59,  # bed
-}
+# Removed TARGET_CLASS_IDS since filtering is not needed anymore
 
 CUSTOM_LABELS = {
     0:  "Person / Mannequin",
@@ -89,7 +72,6 @@ def main():
         show=False
     )
 
-
     all_frames = []
     all_detections = []
     frame_count = 0
@@ -109,12 +91,11 @@ def main():
         # Current frame's detections, after filtering
         current_detections = []
 
-        # If we get no detections, we just increment miss_count for all in track_history
+        # Process detections if they exist
         if result.boxes is not None and len(result.boxes) > 0:
             for box in result.boxes:
                 class_id = int(box.cls[0])
-                if class_id not in TARGET_CLASS_IDS:
-                    continue
+                # Removed filtering by TARGET_CLASS_IDS
 
                 conf = float(box.conf[0])
                 x1, y1, x2, y2 = map(int, box.xyxy[0].tolist())
