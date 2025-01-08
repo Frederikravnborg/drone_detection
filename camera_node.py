@@ -6,6 +6,7 @@ import cv2
 
 # Toggle between using live camera feed and MP4 file.
 USE_MP4_FILE = True  # Set to True to use run.mp4, False for live camera
+video_path = "videos/football.mp4"
 
 class CameraNode(Node):
     def __init__(self):
@@ -20,7 +21,7 @@ class CameraNode(Node):
 
         # Depending on the toggle, open the appropriate video source.
         if USE_MP4_FILE:
-            self.cap = cv2.VideoCapture("run.mp4")
+            self.cap = cv2.VideoCapture(video_path)
             if not self.cap.isOpened():
                 self.get_logger().error("Could not open video file run.mp4.")
             else:
